@@ -1,169 +1,156 @@
 #include <iostream>
-#include <winsock2.h>  // For Windows Sockets
-#include <thread>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <fstream>
-#include "checksum.h"  //include the checksum error dection
+#include <thread>
+#include <vector>
 
-#pragma comment(lib, "ws2_32.lib")  // Link Winsock library
+#pragma comment(lib, "Ws2_32.lib")
 
-//Server is listens to port 8080 for client connections
-const int PORT = 8080;
+#define SERVER_PORT 8080
+#define BUFFER_SIZE 1024
 
-const int BUFFER_SIZE = 1024;
+void handleClient(SOCKET clientSocket);
 
-void handle_put(SOCKET client_socket, std::string& filename) {
-    char buffer[BUFFER_SIZE];
-    std::ofstream outfile(filename, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error creating file on server.\n";
-        return;
-    }
-
-    // Receive the checksum from the client
-    unsigned int client_checksum;
-    recv(client_socket, (char*)&client_checksum, sizeof(client_checksum), 0);
-    std::cout << "Checksum received from client: " << client_checksum << std::endl;
-
-    // Receive the file
-    int bytes_received = 0;
-    while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        outfile.write(buffer, bytes_received);
-    }
-
-    outfile.close();
-    std::cout << "File '" << filename << "' received from client.\n";
-
-    // Compute checksum of the received file
-    unsigned int server_checksum = compute_checksum(filename.c_str(), BUFFER_SIZE );
-    std::cout << "Checksum calculated on server for file '" << filename << "': " << server_checksum << std::endl;
-
-    // Compare the checksums
-    if (client_checksum == server_checksum) {
-        std::cout << "Checksum match: File transfer successful.\n";
-    } else {
-        std::cerr << "Checksum mismatch: File may be corrupted.\n";
-    }
-}
-
-void handle_get(SOCKET client_socket, const std::string& filename) {
-    char buffer[BUFFER_SIZE];
-    std::ifstream infile(filename, std::ios::binary);
-    if (!infile) {
-        std::cerr << "Error: File not found on server.\n";
-        send(client_socket, "ERROR: File not found", 21, 0);
-        return;
-    }
-
-    while (!infile.eof()) {
-        infile.read(buffer, BUFFER_SIZE);
-        send(client_socket, buffer, infile.gcount(), 0);
-    }
-    infile.close();
-    std::cout << "File '" << filename << "' sent to client.\n";
-}
-
-void client_handler(SOCKET client_socket) {
-
-
-    char buffer[BUFFER_SIZE];
-    while (true) {
-        // Receive data from the client
-
-        int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
-        if (bytes_received <= 0) {
-            std::cerr << "Client disconnected or timeout. Bytes received: " << bytes_received << "\n";
-            break;
-        }
-        
-        buffer[bytes_received] = '\0';
-        // Debugging received data new(10:48pm) worked
-        std::cout << "Received data: " << buffer << std::endl;
-
-        std::string command(buffer);
-
-        //New code (10:57)
-        if (command.substr(0, 3) == "put") {
-            // Ensure the command has enough length to extract the filename
-            if (command.length() > 4) {
-                std::string filename = command.substr(4);  // Extract filename
-                std::cout << "Command received: put " << filename << std::endl;
-                handle_put(client_socket, filename);
-            } else {
-                std::cerr << "No filename provided with put command.\n";
-            }
-        } else if (command.substr(0, 3) == "get") {
-            if (command.length() > 4) {
-                std::string filename = command.substr(4);  // Extract filename
-                std::cout << "Command received: get " << filename << std::endl;
-                handle_get(client_socket, filename);
-            } else {
-                std::cerr << "No filename provided with get command.\n";
-            }
-        } else {
-            std::cerr << "Unknown command received: " << command << std::endl;
-        }
-    }
-    closesocket(client_socket);
-}
-
-
+void sendFile(SOCKET clientSocket, const std::string& filename);
+void receiveFile(SOCKET clientSocket, const std::string& filename);
 
 int main() {
-    WSADATA wsa;
-    SOCKET server_socket, client_socket;
-    struct sockaddr_in server_addr, client_addr;
-    int client_addr_len = sizeof(client_addr);
+    WSADATA wsaData;
+    SOCKET serverSocket, clientSocket;
+    struct sockaddr_in serverAddr, clientAddr;
+    int clientAddrSize = sizeof(clientAddr);
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "Failed to initialize Winsock. Error Code: " << WSAGetLastError() << "\n";
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed.\n";
         return 1;
     }
 
-    // Create server socket
-    server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == INVALID_SOCKET) {
-        std::cerr << "Could not create socket. Error Code: " << WSAGetLastError() << "\n";
+    // Create socket
+    serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (serverSocket == INVALID_SOCKET) {
+        std::cerr << "Socket creation failed.\n";
+        WSACleanup();
         return 1;
     }
 
-    // Prepare the sockaddr_in structure
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    // Set up the server address structure
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(SERVER_PORT);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
 
     // Bind the socket
-    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed. Error Code: " << WSAGetLastError() << "\n";
-        closesocket(server_socket);
+    if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        std::cerr << "Bind failed.\n";
+        closesocket(serverSocket);
         WSACleanup();
         return 1;
     }
 
     // Listen for incoming connections
-    if (listen(server_socket, 5) == SOCKET_ERROR) {
-        std::cerr << "Listen failed. Error Code: " << WSAGetLastError() << "\n";
-        closesocket(server_socket);
+    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
+        std::cerr << "Listen failed.\n";
+        closesocket(serverSocket);
         WSACleanup();
         return 1;
     }
 
-    std::cout << "Server is listening on port " << PORT << "...\n";
+    std::cout << "Server is running and waiting for connections...\n";
 
-    // Main server loop to accept and handle clients
+    std::vector<std::thread> clientThreads;
+
+    // Accept client connections and handle them in separate threads
     while (true) {
-        client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_addr_len);
-        if (client_socket == INVALID_SOCKET) {
-            std::cerr << "Accept failed. Error Code: " << WSAGetLastError() << "\n";
+        clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrSize);
+        if (clientSocket == INVALID_SOCKET) {
+            std::cerr << "Failed to accept client connection.\n";
             continue;
         }
-        std::cout << "Client connected.\n";
 
-        // Create a new thread for each client
-        std::thread(client_handler, client_socket).detach();
+        std::cout << "Client connected.\n";
+        clientThreads.push_back(std::thread(handleClient, clientSocket));
     }
 
-    closesocket(server_socket);
+    // Cleanup (unreachable in this example, but good practice to include)
+    closesocket(serverSocket);
     WSACleanup();
+
     return 0;
+}
+
+void handleClient(SOCKET clientSocket) {
+    char buffer[BUFFER_SIZE];
+    int bytesReceived;
+
+    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
+        buffer[bytesReceived] = '\0';
+        std::string command(buffer);
+
+        std::string action = command.substr(0, command.find(' '));
+        std::string filename = command.substr(command.find(' ') + 1);
+
+        if (action == "put") {
+            std::cout << "Receiving file: " << filename << "\n";
+            receiveFile(clientSocket, filename);
+        } else if (action == "get") {
+            std::cout << "Sending file: " << filename << "\n";
+            sendFile(clientSocket, filename);
+        } else {
+            std::cerr << "Unknown command: " << command << "\n";
+        }
+    }
+
+    // Close the client socket
+    closesocket(clientSocket);
+    std::cout << "Client disconnected.\n";
+}
+
+void sendFile(SOCKET clientSocket, const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Could not open file: " << filename << "\n";
+        return;
+    }
+
+    char buffer[BUFFER_SIZE];
+    while (!file.eof()) {
+        file.read(buffer, BUFFER_SIZE);
+        int bytesRead = file.gcount();
+        send(clientSocket, buffer, bytesRead, 0);
+    }
+
+    file.close();
+    std::cout << "File " << filename << " sent to client.\n";
+}
+
+void receiveFile(SOCKET clientSocket, const std::string& filename) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Could not create file: " << filename << "\n";
+        return;
+    }
+
+    char buffer[BUFFER_SIZE];
+    int bytesReceived;
+    bool dataReceived = false;
+
+    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
+        dataReceived = true;
+        file.write(buffer, bytesReceived);
+        if (bytesReceived < BUFFER_SIZE) {
+            break;  // Assume the transmission is complete if less than buffer size is received.
+        }
+    }
+
+    file.close();
+
+    if (!dataReceived) {
+        std::cerr << "No data received for file: " << filename << "\n";
+        send(clientSocket, "File upload failed: No data received", 38, 0);
+        std::remove(filename.c_str());
+    } else {
+        std::cout << "File " << filename << " received from client.\n";
+        send(clientSocket, "File upload successful", 22, 0);
+    }
 }
