@@ -1,149 +1,128 @@
 #include <iostream>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <fstream>
-#include <cstring>
-#include <winsock2.h>  // Windows sockets library
-#include <ws2tcpip.h>  // For InetPton function
-#include "checksum.h" // includes the checksum function for error dection
 
-#pragma comment(lib, "ws2_32.lib")  // Link with Winsock library
+#pragma comment(lib, "Ws2_32.lib")
 
-#define PORT 8080
+#define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
 
-void send_file(SOCKET socket_fd, const char* filename);
-void receive_file(SOCKET socket_fd, const char* filename);
+void sendFile(SOCKET& clientSocket, const std::string& filename);
+void receiveFile(SOCKET& clientSocket, const std::string& filename);
 
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        //When running client code have to ./client put/get filename
-        std::cerr << "Usage: " << argv[0] << " <put|get> <filename>" << std::endl;
-        return 1;
-    }
-
-    const char* command = argv[1];
-    const char* filename = argv[2];
-
-    //Debugging argument
-    std::cout << "Command: " << command << ", Filename: " << filename << std::endl;
-
-    WSADATA wsa;
-    SOCKET sock;
-    struct sockaddr_in server_addr;
+    WSADATA wsaData;
+    SOCKET clientSocket;
+    struct sockaddr_in serverAddr;
+    char buffer[BUFFER_SIZE];
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "Failed to initialize Winsock. Error Code: " << WSAGetLastError() << std::endl;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed.\n";
         return 1;
     }
 
     // Create socket
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
-        std::cerr << "Could not create socket. Error Code: " << WSAGetLastError() << std::endl;
-        return 1;
-    }
-
-    // Configure server address
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-
-
-// Set server address to localhost (127.0.0.1) Will need to change the IP since it is only unique to my computer
-
-    // Debugging code
-     
-    if (inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid address / Address not supported" << std::endl;
-        closesocket(sock);
+    clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (clientSocket == INVALID_SOCKET) {
+        std::cerr << "Socket creation failed.\n";
         WSACleanup();
         return 1;
     }
 
-    // Debug output for connection attempt
-    std::cout << "Connecting to the server..." << std::endl;
+    // Server address
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(SERVER_PORT);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
-
-    // Connect to the server
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "Connection failed. Error Code: " << WSAGetLastError() << std::endl;
-        closesocket(sock);
+    // Connect to server
+    if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        std::cerr << "Connection to server failed.\n";
+        closesocket(clientSocket);
         WSACleanup();
         return 1;
     }
 
-    std::cout << "Connected to the server!" << std::endl;
+    std::cout << "Connected to server.\n";
+    
+    while (true) {
+        std::cout << "Enter command (put <filename> / get <filename> / exit): ";
+        std::cin.getline(buffer, BUFFER_SIZE);
+        std::string command(buffer);
 
+        // Send command to the server
+        send(clientSocket, buffer, command.size(), 0);
 
+        if (command == "exit") {
+            break;
+        }
 
-    //replaced int bytes code (11:00)
-    std::string full_command = std::string(command) + " " + filename + "\n";
-    int bytes_sent = send(sock, full_command.c_str(), full_command.length(), 0);
-    if (bytes_sent == SOCKET_ERROR) {
-        std::cerr << "Failed to send command. Error Code: " << WSAGetLastError() << std::endl;
-        closesocket(sock);
-        WSACleanup();
-        return 1;
+        // Parse the command to decide on file transfer action
+        std::string action = command.substr(0, command.find(' '));
+        std::string filename = command.substr(command.find(' ') + 1);
+
+        if (action == "put") {
+            sendFile(clientSocket, filename);
+
+            // Wait for confirmation from the server
+            int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+            if (bytesReceived > 0) {
+                buffer[bytesReceived] = '\0';
+                std::cout << "Server response: " << buffer << "\n";
+            }
+        } else if (action == "get") {
+            receiveFile(clientSocket, filename);
+        } else {
+            std::cout << "Invalid command.\n";
+        }
     }
 
-    if (strcmp(command, "put") == 0) {
-        // Send file to the server
-        send_file(sock, filename);
-    } else if (strcmp(command, "get") == 0) {
-        // Receive file from the server
-        receive_file(sock, filename);
-    } else {
-        std::cerr << "Invalid command. Use 'put' or 'get'." << std::endl;
-    }
-
-    // Close socket
-    closesocket(sock);
+    // Cleanup
+    closesocket(clientSocket);
     WSACleanup();
     return 0;
 }
 
-// Function to send a file to the server
-void send_file(SOCKET socket_fd, const char* filename) {
-    
-    // Calculate checksum
-    unsigned int checksum = compute_checksum(filename,BUFFER_SIZE);
-    std::cout << "Checksum calculated for file '" << filename << "': " << checksum << std::endl;
-
-    // Send checksum to the server
-    send(socket_fd, (char*)&checksum, sizeof(checksum), 0);
-
-    //Proceed to send the file
+void sendFile(SOCKET& clientSocket, const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "File not found: " << filename << std::endl;
+        std::cerr << "Could not open file: " << filename << "\n";
         return;
     }
 
-    char buffer[BUFFER_SIZE] = {0};
-    while (file.read(buffer, BUFFER_SIZE)) {
-        send(socket_fd, buffer, file.gcount(), 0);
+    char buffer[BUFFER_SIZE];
+    bool dataSent = false;
+
+    while (!file.eof()) {
+        file.read(buffer, BUFFER_SIZE);
+        int bytesRead = file.gcount();
+        send(clientSocket, buffer, bytesRead, 0);
+        dataSent = true;
     }
-    // Send any remaining bytes
-    if (file.gcount() > 0) {
-        send(socket_fd, buffer, file.gcount(), 0);
-    }
-    
+
     file.close();
-    std::cout << "File '" << filename << "' has been sent successfully." << std::endl;
+
+    if (dataSent) {
+        std::cout << "File " << filename << " sent successfully.\n";
+    } else {
+        std::cerr << "No data was sent for file: " << filename << "\n";
+    }
 }
 
-// Function to receive a file from the server
-void receive_file(SOCKET socket_fd, const char* filename) {
+void receiveFile(SOCKET& clientSocket, const std::string& filename) {
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "Failed to create file: " << filename << std::endl;
+        std::cerr << "Could not create file: " << filename << "\n";
         return;
     }
 
-    char buffer[BUFFER_SIZE] = {0};
-    int bytes_received;
-    while ((bytes_received = recv(socket_fd, buffer, BUFFER_SIZE, 0)) > 0) {
-        file.write(buffer, bytes_received);
+    char buffer[BUFFER_SIZE];
+    int bytesReceived;
+    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
+        file.write(buffer, bytesReceived);
     }
 
     file.close();
-    std::cout << "File '" << filename << "' has been received and saved." << std::endl;
+    std::cout << "File " << filename << " received successfully.\n";
 }
