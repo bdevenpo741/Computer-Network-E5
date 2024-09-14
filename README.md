@@ -1,4 +1,3 @@
-The checksum.cpp/checksum.h is a checker that ensures the server and client receive the correct data. 
 The Client code the put function works at connecting to the server and sending the test file. 
 For it to work on your computer you will need to change localhost to be your computer IP.
 The biggest issue right now is having the server unable to recognize the command it receives from the client. 
