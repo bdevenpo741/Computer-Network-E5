@@ -12,7 +12,6 @@
 
 void handleClient(SOCKET clientSocket);
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
-void sendFile(SOCKET clientSocket, const std::string& filename);
 void receiveFile(SOCKET clientSocket, const std::string& filename);
 
 int main() {
@@ -106,33 +105,7 @@ void handleClient(SOCKET clientSocket) {
     std::cout << "Client disconnected.\n";
 }
 
-/*void sendFile(SOCKET clientSocket, const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Could not open file: " << filename << "\n";
-        return;
-    }
-
-    char buffer[BUFFER_SIZE];
-    while (!file.eof()) {
-        file.read(buffer, BUFFER_SIZE);
-        int bytesRead = file.gcount();
-        unsigned int bytesSent = 0;
-        int bytesToSend = 0;
-
-        while (bytesSent < BUFFER_SIZE)
-        {
-                bytesToSend = BUFFER_SIZE - bytesSent;
-            send(clientSocket, buffer + bytesSent, bytesToSend, 0);
-            bytesSent += bytesToSend;
-        }
-        
-    }
-
-    file.close();
-    std::cout << "File " << filename << " sent to client.\n";
-}*/
-
+//function to recieve file from client
 void receiveFile(SOCKET clientSocket, const std::string& filename) {
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
@@ -164,14 +137,9 @@ void receiveFile(SOCKET clientSocket, const std::string& filename) {
     }
 }
 
-
-
-
-
-
+//function to recieve file size for buffer
 int64_t GetFileSize(const std::string& fileName) {
-    // no idea how to get filesizes > 2.1 GB in a C++ kind-of way.
-    // I will cheat and use Microsoft's C-style file API
+   
     FILE* f;
     if (fopen_s(&f, fileName.c_str(), "rb") != 0) {
         return -1;
@@ -182,9 +150,7 @@ int64_t GetFileSize(const std::string& fileName) {
     return len;
 }
 
-///
-/// Recieves data in to buffer until bufferSize value is met
-///
+//recieve buffer data of file for retrieval
 int RecvBuffer(SOCKET s, char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
     int i = 0;
     while (i < bufferSize) {
@@ -195,9 +161,7 @@ int RecvBuffer(SOCKET s, char* buffer, int bufferSize, int chunkSize = 4 * 1024)
     return i;
 }
 
-///
-/// Sends data in buffer until bufferSize value is met
-///
+//sends buffer to confirm file data
 int SendBuffer(SOCKET s, const char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
 
     int i = 0;
@@ -209,13 +173,7 @@ int SendBuffer(SOCKET s, const char* buffer, int bufferSize, int chunkSize = 4 *
     return i;
 }
 
-//
-// Sends a file
-// returns size of file if success
-// returns -1 if file couldn't be opened for input
-// returns -2 if couldn't send file length properly
-// returns -3 if file couldn't be sent properly
-//
+//function to send file data to client
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize = 64 * 1024) {
 
     const int64_t fileSize = GetFileSize(fileName);
@@ -246,34 +204,4 @@ int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize = 64 * 102
     return errored ? -3 : fileSize;
 }
 
-//
-// Receives a file
-// returns size of file if success
-// returns -1 if file couldn't be opened for output
-// returns -2 if couldn't receive file length properly
-// returns -3 if couldn't receive file properly
-//
-int64_t RecvFile(SOCKET s, const std::string& fileName, int chunkSize = 64 * 1024) {
-    std::ofstream file(fileName, std::ofstream::binary);
-    if (file.fail()) { return -1; }
 
-    int64_t fileSize;
-    if (RecvBuffer(s, reinterpret_cast<char*>(&fileSize),
-        sizeof(fileSize)) != sizeof(fileSize)) {
-        return -2;
-    }
-
-    char* buffer = new char[chunkSize];
-    bool errored = false;
-    int64_t i = fileSize;
-    while (i != 0) {
-        const int r = RecvBuffer(s, buffer, (int)__min(i, (int64_t)chunkSize));
-        if ((r < 0) || !file.write(buffer, r)) { errored = true; break; }
-        i -= r;
-    }
-    delete[] buffer;
-
-    file.close();
-
-    return errored ? -3 : fileSize;
-}
