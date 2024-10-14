@@ -4,20 +4,26 @@
 #include <fstream>
 #include <thread>
 #include <vector>
-
+#include <mutex>
+#include <algorithm>
 #pragma comment(lib, "Ws2_32.lib")
 
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
+#define UDP_PORT 8081
 
+std::vector<SOCKET> udpClients;
+std::mutex clientsMutex;
+
+void broadcastMessage(const std::string& message, SOCKET senderSocket);
 void handleClient(SOCKET clientSocket);
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
 void receiveFile(SOCKET clientSocket, const std::string& filename);
 
 int main() {
     WSADATA wsaData;
-    SOCKET serverSocket, clientSocket;
-    struct sockaddr_in serverAddr, clientAddr;
+    SOCKET serverSocket, clientSocket, udpSocket;
+    struct sockaddr_in serverAddr, clientAddr, udpAddr;
     int clientAddrSize = sizeof(clientAddr);
 
     // Initialize Winsock
@@ -55,6 +61,33 @@ int main() {
         return 1;
     }
 
+
+    // Create UDP socket
+    udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpSocket == INVALID_SOCKET)
+    {
+        std::cerr << "UDP socket creation failed.\n";
+        closesocket(serverSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // UDP address structure
+    udpAddr.sin_family = AF_INET;
+    udpAddr.sin_port = htons(UDP_PORT);
+    udpAddr.sin_addr.s_addr = INADDR_ANY;
+
+    // Bind UDP socket
+    if (bind(udpSocket, (sockaddr*)&udpAddr, sizeof(udpAddr)) == SOCKET_ERROR)
+    {
+        std::cerr << "UDP Bind failed";
+        closesocket(udpSocket);
+        closesocket(serverSocket);
+        WSACleanup();
+        return 1;
+    }
+
+
     std::cout << "Server is running and waiting for connections...\n";
 
     std::vector<std::thread> clientThreads;
@@ -68,6 +101,13 @@ int main() {
         }
 
         std::cout << "Client connected.\n";
+
+        // Adds clients to the UDP clients list
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            udpClients.push_back(clientSocket);
+        }
+
         clientThreads.push_back(std::thread(handleClient, clientSocket));
     }
 
@@ -86,24 +126,55 @@ void handleClient(SOCKET clientSocket) {
         buffer[bytesReceived] = '\0';
         std::string command(buffer);
 
-        std::string action = command.substr(0, command.find(' '));
-        std::string filename = command.substr(command.find(' ') + 1);
+        
+         
+           
+                 std::string action = command.substr(0, command.find(' '));
+                 std::string filename = command.substr(command.find(' ') + 1);
 
-        if (action == "put") {
-            std::cout << "Receiving file: " << filename << "\n";
-            receiveFile(clientSocket, filename);
-        } else if (action == "get") {
-            std::cout << "Sending file: " << filename << "\n";
-            SendFile(clientSocket, filename, buff);
-        } else {
-            std::cerr << "Unknown command: " << command << "\n";
-        }
+           if (action[0] == '%') {
+                     action = action.substr(1); // Remove the '%' character
+                     std::cout << action << " && " << filename << std::endl;
+
+                if (action == "put") {
+                    std::cout << "Receiving file: " << filename << "\n";
+                    receiveFile(clientSocket, filename);
+                } else if (action == "get") {
+                    std::cout << "Sending file: " << filename << "\n";
+                    SendFile(clientSocket, filename, buff);
+                } else {
+                    std::cerr << "Unknown command: " << command << "\n";
+                }
+            }
+            else {
+               std::cout << "Broadcasting message: " << command << "\n";
+               broadcastMessage(command, clientSocket);
+            }
     }
-
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        auto it = std::remove(udpClients.begin(), udpClients.end(), clientSocket);
+        udpClients.erase(it, udpClients.end());
+    }
     // Close the client socket
     closesocket(clientSocket);
     std::cout << "Client disconnected.\n";
 }
+
+
+void broadcastMessage(const std::string& message, SOCKET senderSocket)
+{
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+
+        for (SOCKET client : udpClients)
+        {
+            send(client, message.c_str(), message.length(), 0);
+        }
+    }
+}
+
+
 
 //function to recieve file from client
 void receiveFile(SOCKET clientSocket, const std::string& filename) {

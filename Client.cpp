@@ -2,14 +2,17 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <fstream>
+#include <thread>
 
 #pragma comment(lib, "Ws2_32.lib")
 
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
+#define UDP_PORT 8081
 
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
 void receiveFile(SOCKET& clientSocket, const std::string& filename);
+void receiveMessages(SOCKET clientSocket);
 
 int main(int argc, char* argv[]) {
     WSADATA wsaData;
@@ -45,7 +48,10 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Connected to server.\n";
-    
+    // Start a thread to receive messages from the server
+    std::thread receiveThread(receiveMessages, clientSocket);
+
+
     while (true) {
         std::cout << "Enter command (put <filename> / get <filename> / exit): ";
         std::cin.getline(buffer, BUFFER_SIZE);
@@ -62,23 +68,30 @@ int main(int argc, char* argv[]) {
         std::string action = command.substr(0, command.find(' '));
         std::string filename = command.substr(command.find(' ') + 1);
 
-        if (action == "put") {
-            SendFile(clientSocket, filename,BUFFER_SIZE);
+        if (action[0] == '%') {
+            action = action.substr(1); // Remove the '%' character
 
-            // Wait for confirmation from the server
-            int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
-            if (bytesReceived > 0) {
-                buffer[bytesReceived] = '\0';
-                std::cout << "Server response: " << buffer << "\n";
+            if (action == "put") {
+                SendFile(clientSocket, filename, BUFFER_SIZE);
+
+                // Wait for confirmation from the server
+                int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+                if (bytesReceived > 0) {
+                    buffer[bytesReceived] = '\0';
+                    std::cout << "Server response: " << buffer << "\n";
+                }
             }
-        } else if (action == "get") {
-            receiveFile(clientSocket, filename);
-        } else {
-            std::cout << "Invalid command.\n";
+            else if (action == "get") {
+                receiveFile(clientSocket, filename);
+            }
+        }
+        else {
+            send(clientSocket, command.c_str(), command.size(), 0);
         }
     }
 
     // Cleanup
+    receiveThread.join();
     closesocket(clientSocket);
     WSACleanup();
     return 0;
@@ -102,7 +115,26 @@ void receiveFile(SOCKET& clientSocket, const std::string& filename) {
     std::cout << "File " << filename << " received successfully.\n";
 }
 
+void receiveMessages(SOCKET clientSocket)
+{
+    char buffer[BUFFER_SIZE];
+    int bytesReceived;
 
+    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0)
+    {
+        buffer[bytesReceived] = '\0'; // Null-terminate the received string
+        std::cout << "Server: " << buffer << std::endl;
+    }
+
+    if (bytesReceived == 0)
+    {
+        std::cout << "Server disconnected.\n";
+    }
+    else
+    {
+        std::cerr << "Error receiving message from server.\n";
+    }
+}
 
 //get file size for buffer
 int64_t GetFileSize(const std::string& fileName) {
