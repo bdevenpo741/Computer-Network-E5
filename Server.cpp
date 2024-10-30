@@ -6,19 +6,34 @@
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include <map>
+#include <string>
+#include <sstream>
 #pragma comment(lib, "Ws2_32.lib")
 
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
 #define UDP_PORT 8081
 
+// Add these structures to store user and resource information
+std::map<std::string, std::pair<std::string, bool>> userDirectory; // username -> <IP, active>
+std::map<std::string, std::string> resourceDirectory; // resourceName -> ownerName
 std::vector<SOCKET> udpClients;
 std::mutex clientsMutex;
+SOCKET udpSocket;
 
-void broadcastMessage(const std::string& message, SOCKET senderSocket);
+void registerClient(const std::string& username, const std::string& ip, const std::vector<std::string>& resources);
+void sendResourceList(SOCKET clientSocket);
 void handleClient(SOCKET clientSocket);
+void sendHelloMessages();
+
+// Functions below are not required in this project but are kept for potential use in the final project,
+// which may involve advanced file transfer or message broadcasting functionalities.
+
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
 void receiveFile(SOCKET clientSocket, const std::string& filename);
+void broadcastMessage(const std::string& message, SOCKET senderSocket);
+
 
 int main() {
     WSADATA wsaData;
@@ -61,61 +76,113 @@ int main() {
         return 1;
     }
 
-
-    // Create UDP socket
-    udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udpSocket == INVALID_SOCKET)
-    {
-        std::cerr << "UDP socket creation failed.\n";
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    // UDP address structure
-    udpAddr.sin_family = AF_INET;
-    udpAddr.sin_port = htons(UDP_PORT);
-    udpAddr.sin_addr.s_addr = INADDR_ANY;
-
-    // Bind UDP socket
-    if (bind(udpSocket, (sockaddr*)&udpAddr, sizeof(udpAddr)) == SOCKET_ERROR)
-    {
-        std::cerr << "UDP Bind failed";
-        closesocket(udpSocket);
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-
-
     std::cout << "Server is running and waiting for connections...\n";
+    std::thread helloThread(sendHelloMessages);
+    helloThread.detach();
 
-    std::vector<std::thread> clientThreads;
-
-    // Accept client connections and handle them in separate threads
     while (true) {
         clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrSize);
-        if (clientSocket == INVALID_SOCKET) {
-            std::cerr << "Failed to accept client connection.\n";
-            continue;
-        }
-
-        std::cout << "Client connected.\n";
-
-        // Adds clients to the UDP clients list
-        {
+        if (clientSocket != INVALID_SOCKET) {
             std::lock_guard<std::mutex> lock(clientsMutex);
             udpClients.push_back(clientSocket);
+            std::thread(handleClient, clientSocket).detach();
         }
-
-        clientThreads.push_back(std::thread(handleClient, clientSocket));
     }
 
-    // Cleanup (unreachable in this example, but good practice to include)
+// Functions below are not required in this project but are kept for potential use in the final project,
+// which may involve advanced file transfer or message broadcasting functionalities.
+
+    // // Create UDP socket
+    // udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    // if (udpSocket == INVALID_SOCKET)
+    // {
+    //     std::cerr << "UDP socket creation failed.\n";
+    //     closesocket(serverSocket);
+    //     WSACleanup();
+    //     return 1;
+    // }
+
+    // // UDP address structure
+    // udpAddr.sin_family = AF_INET;
+    // udpAddr.sin_port = htons(UDP_PORT);
+    // udpAddr.sin_addr.s_addr = INADDR_ANY;
+
+    // // Bind UDP socket
+    // if (bind(udpSocket, (sockaddr*)&udpAddr, sizeof(udpAddr)) == SOCKET_ERROR)
+    // {
+    //     std::cerr << "UDP Bind failed";
+    //     closesocket(udpSocket);
+    //     closesocket(serverSocket);
+    //     WSACleanup();
+    //     return 1;
+    // }
+
+
+    // std::cout << "Server is running and waiting for connections...\n";
+
+    // std::vector<std::thread> clientThreads;
+
+    // // Accept client connections and handle them in separate threads
+    // while (true) {
+    //     clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrSize);
+    //     if (clientSocket == INVALID_SOCKET) {
+    //         std::cerr << "Failed to accept client connection.\n";
+    //         continue;
+    //     }
+
+    //     std::cout << "Client connected.\n";
+
+    //     // Adds clients to the UDP clients list
+    //     {
+    //         std::lock_guard<std::mutex> lock(clientsMutex);
+    //         udpClients.push_back(clientSocket);
+    //     }
+
+    //     clientThreads.push_back(std::thread(handleClient, clientSocket));
+    // }
+
+
+   // Cleanup (unreachable in this example, but good practice to include)
     closesocket(serverSocket);
     WSACleanup();
 
     return 0;
+
+}
+
+void registerClient(const std::string& username, const std::string& ip, const std::vector<std::string>& resources) {
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        userDirectory[username] = { ip, true };
+        for (const auto& resource : resources) {
+            resourceDirectory[resource] = username;
+        }
+    }
+    std::cout << "Registered user: " << username << " with resources.\n";
+}
+void sendHelloMessages() {
+    while (true) {
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        for (const auto& [username, userInfo] : userDirectory) {
+            const std::string& ip = userInfo.first;
+            sockaddr_in clientAddr;
+            clientAddr.sin_family = AF_INET;
+            clientAddr.sin_port = htons(UDP_PORT);
+            inet_pton(AF_INET, ip.c_str(), &clientAddr.sin_addr);
+
+            std::string helloMessage = "HELLO " + username;
+            sendto(udpSocket, helloMessage.c_str(), helloMessage.size(), 0, (sockaddr*)&clientAddr, sizeof(clientAddr));
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(10)); // Adjust the interval as needed
+    }
+}
+
+void sendResourceList(SOCKET clientSocket) {
+    std::string resourceList = "Available resources:\n";
+    for (const auto& [resource, owner] : resourceDirectory) {
+        resourceList += resource + " - owned by " + owner + "\n";
+    }
+    send(clientSocket, resourceList.c_str(), resourceList.size(), 0);
 }
 
 void handleClient(SOCKET clientSocket) {
@@ -126,13 +193,23 @@ void handleClient(SOCKET clientSocket) {
         buffer[bytesReceived] = '\0';
         std::string command(buffer);
 
-        
-         
-           
                  std::string action = command.substr(0, command.find(' '));
                  std::string filename = command.substr(command.find(' ') + 1);
-
-           if (action[0] == '%') {
+            if (action == "REGISTER") {
+                std::string username = filename.substr(0, filename.find(' '));
+                std::string resourceList = filename.substr(filename.find(' ') + 1);
+                std::vector<std::string> resources;
+                std::istringstream iss(resourceList);
+                std::string resource;
+            while (getline(iss, resource, ',')) {
+                resources.push_back(resource);
+                }
+                sockaddr_in clientAddr;
+                registerClient(username, inet_ntoa(clientAddr.sin_addr), resources);
+            } else if (action == "list_resources") {
+                sendResourceList(clientSocket);
+           
+           } else if (action[0] == '%') {
                      action = action.substr(1); // Remove the '%' character
                      std::cout << action << " && " << filename << std::endl;
 

@@ -3,6 +3,9 @@
 #include <ws2tcpip.h>
 #include <fstream>
 #include <thread>
+#include <vector>
+#include <string>
+#include <sstream>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -10,9 +13,15 @@
 #define BUFFER_SIZE 1024
 #define UDP_PORT 8081
 
+void receiveMessages(SOCKET clientSocket);
+void registerWithServer(SOCKET clientSocket, const std::string& username, const std::vector<std::string>& resources);
+
+// File transfer functions are not needed in this project, but are commented out here for the final project,
+// where advanced file transfer may be required.
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
 void receiveFile(SOCKET& clientSocket, const std::string& filename);
-void receiveMessages(SOCKET clientSocket);
+
+
 
 int main(int argc, char* argv[]) {
     WSADATA wsaData;
@@ -48,6 +57,11 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Connected to server.\n";
+
+    // Register with the server  IDK about the code
+    std::vector<std::string> resources = {"file1.txt", "file2.txt"}; // Replace with actual resources
+    registerWithServer(clientSocket, "user1", resources);
+
     // Start a thread to receive messages from the server
     std::thread receiveThread(receiveMessages, clientSocket);
 
@@ -63,32 +77,32 @@ int main(int argc, char* argv[]) {
         if (command == "exit") {
             break;
         }
-
-        // Parse the command to decide on file transfer action
-        std::string action = command.substr(0, command.find(' '));
-        std::string filename = command.substr(command.find(' ') + 1);
-
-        if (action[0] == '%') {
-            action = action.substr(1); // Remove the '%' character
-
-            if (action == "put") {
-                SendFile(clientSocket, filename, BUFFER_SIZE);
-
-                // Wait for confirmation from the server
-                int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
-                if (bytesReceived > 0) {
-                    buffer[bytesReceived] = '\0';
-                    std::cout << "Server response: " << buffer << "\n";
-                }
-            }
-            else if (action == "get") {
-                receiveFile(clientSocket, filename);
-            }
-        }
-        else {
-            send(clientSocket, command.c_str(), command.size(), 0);
-        }
     }
+    //     // Parse the command to decide on file transfer action
+    //     std::string action = command.substr(0, command.find(' '));
+    //     std::string filename = command.substr(command.find(' ') + 1);
+
+    //     if (action[0] == '%') {
+    //         action = action.substr(1); // Remove the '%' character
+
+    //         if (action == "put") {
+    //             SendFile(clientSocket, filename, BUFFER_SIZE);
+
+    //             // Wait for confirmation from the server
+    //             int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
+    //             if (bytesReceived > 0) {
+    //                 buffer[bytesReceived] = '\0';
+    //                 std::cout << "Server response: " << buffer << "\n";
+    //             }
+    //         }
+    //         else if (action == "get") {
+    //             receiveFile(clientSocket, filename);
+    //         }
+    //     }
+    //     else {
+    //         send(clientSocket, command.c_str(), command.size(), 0);
+    //     }
+    // }
 
     // Cleanup
     receiveThread.join();
@@ -96,6 +110,16 @@ int main(int argc, char* argv[]) {
     WSACleanup();
     return 0;
 }
+
+void registerWithServer(SOCKET clientSocket, const std::string& username, const std::vector<std::string>& resources) {
+    std::string registrationMessage = "REGISTER " + username + " ";
+    for (const auto& resource : resources) {
+        registrationMessage += resource + ",";
+    }
+    send(clientSocket, registrationMessage.c_str(), registrationMessage.size(), 0);
+    std::cout << "Registration message sent: " << registrationMessage << "\n";
+}
+
 
 //function to recieve file from server
 void receiveFile(SOCKET& clientSocket, const std::string& filename) {

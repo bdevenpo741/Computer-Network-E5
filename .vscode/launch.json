@@ -1,0 +1,28 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Launch Client",
+        "type": "cppvsdbg",
+        "request": "launch",
+        "program": "${workspaceFolder}\\Client.exe",
+        "args": [],
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "environment": [],
+        "console": "externalTerminal"
+      },
+      {
+        "name": "Launch Server",
+        "type": "cppvsdbg",
+        "request": "launch",
+        "program": "${workspaceFolder}\\Server.exe",
+        "args": [],
+        "stopAtEntry": false,
+        "cwd": "${workspaceFolder}",
+        "environment": [],
+        "console": "externalTerminal"
+      }
+    ]
+  }
+  
