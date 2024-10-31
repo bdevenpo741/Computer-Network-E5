@@ -1,33 +1,26 @@
+// Client.cpp
+
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <fstream>
 #include <thread>
-#include <vector>
 #include <string>
 #include <sstream>
-
 #pragma comment(lib, "Ws2_32.lib")
 
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
-#define UDP_PORT 8081
 
-void receiveMessages(SOCKET clientSocket);
-void registerWithServer(SOCKET clientSocket, const std::string& username, const std::vector<std::string>& resources);
-
-// File transfer functions are not needed in this project, but are commented out here for the final project,
-// where advanced file transfer may be required.
-int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
-void receiveFile(SOCKET& clientSocket, const std::string& filename);
-
-
+void receiveMessages(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username);
+void registerWithServer(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username, const std::string& password);
+void announceResources(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username, const std::string& resources);
+void requestResourceList(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username);
 
 int main(int argc, char* argv[]) {
     WSADATA wsaData;
     SOCKET clientSocket;
     struct sockaddr_in serverAddr;
-    char buffer[BUFFER_SIZE];
 
     // Initialize Winsock
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -35,10 +28,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Create socket
-    clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // Create UDP socket
+    clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (clientSocket == INVALID_SOCKET) {
         std::cerr << "Socket creation failed.\n";
+        WSACleanup();
+        return 1;
+    }
+
+    // Bind the client socket to a local port
+    sockaddr_in clientAddr;
+    clientAddr.sin_family = AF_INET;
+    clientAddr.sin_addr.s_addr = INADDR_ANY;
+    clientAddr.sin_port = htons(0); // Use 0 to let the OS assign a port
+
+    if (bind(clientSocket, (sockaddr*)&clientAddr, sizeof(clientAddr)) == SOCKET_ERROR) {
+        std::cerr << "Bind failed with error: " << WSAGetLastError() << "\n";
+        closesocket(clientSocket);
         WSACleanup();
         return 1;
     }
@@ -48,183 +54,100 @@ int main(int argc, char* argv[]) {
     serverAddr.sin_port = htons(SERVER_PORT);
     inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
 
-    // Connect to server
-    if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "Connection to server failed.\n";
-        closesocket(clientSocket);
-        WSACleanup();
-        return 1;
-    }
+    std::string username;
+    std::cout << "Enter username: ";
+    std::getline(std::cin, username);
+    std::string password = "password"; // Optional password handling
 
-    std::cout << "Connected to server.\n";
+    // Register with server
+    registerWithServer(clientSocket, serverAddr, username, password);
 
-    // Register with the server  IDK about the code
-    std::vector<std::string> resources = {"file1.txt", "file2.txt"}; // Replace with actual resources
-    registerWithServer(clientSocket, "user1", resources);
+    // Announce resources
+    std::string resources;
+    std::cout << "Enter resources to share (space-separated filenames): ";
+    std::getline(std::cin, resources);
+    announceResources(clientSocket, serverAddr, username, resources);
 
     // Start a thread to receive messages from the server
-    std::thread receiveThread(receiveMessages, clientSocket);
-
+    std::thread receiveThread(receiveMessages, clientSocket, serverAddr, username);
 
     while (true) {
-        std::cout << "Enter command (put <filename> / get <filename> / exit): ";
-        std::cin.getline(buffer, BUFFER_SIZE);
-        std::string command(buffer);
-
-        // Send command to the server
-        send(clientSocket, buffer, command.size(), 0);
+        std::cout << "Enter command (GET_RESOURCES / exit): ";
+        std::string command;
+        std::getline(std::cin, command);
 
         if (command == "exit") {
+            // Notify server of logout
+            std::string logoutMessage = "LOGOUT " + username;
+            sendto(clientSocket, logoutMessage.c_str(), logoutMessage.length(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
             break;
+        } else if (command == "GET_RESOURCES") {
+            requestResourceList(clientSocket, serverAddr, username);
+        } else {
+            std::cout << "Unknown command.\n";
         }
     }
-    //     // Parse the command to decide on file transfer action
-    //     std::string action = command.substr(0, command.find(' '));
-    //     std::string filename = command.substr(command.find(' ') + 1);
-
-    //     if (action[0] == '%') {
-    //         action = action.substr(1); // Remove the '%' character
-
-    //         if (action == "put") {
-    //             SendFile(clientSocket, filename, BUFFER_SIZE);
-
-    //             // Wait for confirmation from the server
-    //             int bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0);
-    //             if (bytesReceived > 0) {
-    //                 buffer[bytesReceived] = '\0';
-    //                 std::cout << "Server response: " << buffer << "\n";
-    //             }
-    //         }
-    //         else if (action == "get") {
-    //             receiveFile(clientSocket, filename);
-    //         }
-    //     }
-    //     else {
-    //         send(clientSocket, command.c_str(), command.size(), 0);
-    //     }
-    // }
 
     // Cleanup
-    receiveThread.join();
+    receiveThread.detach(); // Or handle thread termination properly
     closesocket(clientSocket);
     WSACleanup();
     return 0;
 }
 
-void registerWithServer(SOCKET clientSocket, const std::string& username, const std::vector<std::string>& resources) {
-    std::string registrationMessage = "REGISTER " + username + " ";
-    for (const auto& resource : resources) {
-        registrationMessage += resource + ",";
-    }
-    send(clientSocket, registrationMessage.c_str(), registrationMessage.size(), 0);
-    std::cout << "Registration message sent: " << registrationMessage << "\n";
-}
+void registerWithServer(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username, const std::string& password) {
+    std::string registerMessage = "REGISTER " + username + " " + password;
+    sendto(clientSocket, registerMessage.c_str(), registerMessage.length(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
 
-
-//function to recieve file from server
-void receiveFile(SOCKET& clientSocket, const std::string& filename) {
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Could not create file: " << filename << "\n";
-        return;
-    }
-
+    // Optionally, wait for acknowledgment
     char buffer[BUFFER_SIZE];
-    int bytesReceived;
-    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
-        file.write(buffer, bytesReceived);
+    sockaddr_in fromAddr;
+    int fromAddrSize = sizeof(fromAddr);
+    int bytesReceived = recvfrom(clientSocket, buffer, BUFFER_SIZE - 1, 0, (sockaddr*)&fromAddr, &fromAddrSize);
+    if (bytesReceived > 0) {
+        buffer[bytesReceived] = '\0';
+        std::string response(buffer);
+        std::cout << "Server response: " << response << "\n";
     }
-
-    file.close();
-    std::cout << "File " << filename << " received successfully.\n";
 }
 
-void receiveMessages(SOCKET clientSocket)
-{
+void announceResources(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username, const std::string& resources) {
+    std::string resourceMessage = "RESOURCES " + username + " " + resources;
+    sendto(clientSocket, resourceMessage.c_str(), resourceMessage.length(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
+}
+
+void requestResourceList(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username) {
+    std::string getRequest = "GET_RESOURCES " + username;
+    sendto(clientSocket, getRequest.c_str(), getRequest.length(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
+}
+
+void receiveMessages(SOCKET clientSocket, sockaddr_in serverAddr, const std::string& username) {
     char buffer[BUFFER_SIZE];
-    int bytesReceived;
+    sockaddr_in fromAddr;
+    int fromAddrSize = sizeof(fromAddr);
 
-    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0)
-    {
-        buffer[bytesReceived] = '\0'; // Null-terminate the received string
-        std::cout << "Server: " << buffer << std::endl;
-    }
+    while (true) {
+        int bytesReceived = recvfrom(clientSocket, buffer, BUFFER_SIZE - 1, 0, (sockaddr*)&fromAddr, &fromAddrSize);
+        if (bytesReceived > 0) {
+            buffer[bytesReceived] = '\0';
+            std::string message(buffer);
 
-    if (bytesReceived == 0)
-    {
-        std::cout << "Server disconnected.\n";
-    }
-    else
-    {
-        std::cerr << "Error receiving message from server.\n";
+            if (message == "HELLO") {
+                // Respond to hello message
+                std::string helloAck = "HELLO_ACK " + username;
+                sendto(clientSocket, helloAck.c_str(), helloAck.length(), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
+            } else if (message.substr(0, 13) == "RESOURCE_LIST") {
+                // Parse and display resource list
+                std::cout << "Available Resources:\n";
+                std::istringstream iss(message.substr(14));
+                std::string resource;
+                while (iss >> resource) {
+                    std::cout << resource << "\n";
+                }
+            } else {
+                // Handle other messages
+                std::cout << "Received message: " << message << "\n";
+            }
+        }
     }
 }
-
-//get file size for buffer
-int64_t GetFileSize(const std::string& fileName) {
-    
-    FILE* f;
-    if (fopen_s(&f, fileName.c_str(), "rb") != 0) {
-        return -1;
-    }
-    _fseeki64(f, 0, SEEK_END);
-    const int64_t len = _ftelli64(f);
-    fclose(f);
-    return len;
-}
-
-//allows client to recieve data to buffer until it matches the buffersize of the file
-int RecvBuffer(SOCKET s, char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
-    int i = 0;
-    while (i < bufferSize) {
-        const int l = recv(s, &buffer[i], __min(chunkSize, bufferSize - i), 0);
-        if (l < 0) { return l; } // this is an error
-        i += l;
-    }
-    return i;
-}
-
-//send buffer to server 
-int SendBuffer(SOCKET s, const char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
-
-    int i = 0;
-    while (i < bufferSize) {
-        const int l = send(s, &buffer[i], __min(chunkSize, bufferSize - i), 0);
-        if (l < 0) { return l; } // this is an error
-        i += l;
-    }
-    return i;
-}
-
-//function to send file to server
-int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize = 64 * 1024) {
-
-    const int64_t fileSize = GetFileSize(fileName);
-    if (fileSize < 0) { return -1; }
-
-    std::ifstream file(fileName, std::ifstream::binary);
-    if (file.fail()) { return -1; }
-
-    if (SendBuffer(s, reinterpret_cast<const char*>(&fileSize),
-        sizeof(fileSize)) != sizeof(fileSize)) {
-        return -2;
-    }
-
-    char* buffer = new char[chunkSize];
-    bool errored = false;
-    int64_t i = fileSize;
-    while (i != 0) {
-        const int64_t ssize = __min(i, (int64_t)chunkSize);
-        if (!file.read(buffer, ssize)) { errored = true; break; }
-        const int l = SendBuffer(s, buffer, (int)ssize);
-        if (l < 0) { errored = true; break; }
-        i -= l;
-    }
-    delete[] buffer;
-
-    file.close();
-
-    return errored ? -3 : fileSize;
-}
-
-
