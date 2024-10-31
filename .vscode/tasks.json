@@ -1,0 +1,36 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "build Client",
+        "type": "shell",
+        "command": "cmd.exe",
+        "args": [
+          "/c",
+          "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\VsDevCmd.bat\" && cl.exe /EHsc Client.cpp /Fe:Client.exe"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": ["$msCompile"],
+        "detail": "Task to build Client.cpp using the Visual Studio Developer Command Prompt."
+      },
+      {
+        "label": "build Server",
+        "type": "shell",
+        "command": "cmd.exe",
+        "args": [
+          "/c",
+          "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\Tools\\VsDevCmd.bat\" && cl.exe /EHsc Server.cpp /Fe:Server.exe"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": false
+        },
+        "problemMatcher": ["$msCompile"],
+        "detail": "Task to build Server.cpp using the Visual Studio Developer Command Prompt."
+      }
+    ]
+  }
+  
