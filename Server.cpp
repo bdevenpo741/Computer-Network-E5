@@ -1,3 +1,5 @@
+// Server.cpp
+
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -5,25 +7,45 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <unordered_map>
+#include <string>
+#include <sstream>
+#include <chrono>
 #include <algorithm>
 #pragma comment(lib, "Ws2_32.lib")
 
 #define SERVER_PORT 8080
 #define BUFFER_SIZE 1024
-#define UDP_PORT 8081
 
-std::vector<SOCKET> udpClients;
+// Struct to store user information
+struct UserInfo {
+    SOCKET clientSocket;
+    std::chrono::steady_clock::time_point lastActive;
+    std::string ipAddress;
+    int filePort;
+};
+
+std::vector<SOCKET> clientSockets;
 std::mutex clientsMutex;
+
+// User directory: username -> UserInfo
+std::unordered_map<std::string, UserInfo> userDirectory;
+
+// Resource directory: resource name -> owner username
+std::unordered_map<std::string, std::string> resourceDirectory;
+
+std::mutex directoryMutex;
 
 void broadcastMessage(const std::string& message, SOCKET senderSocket);
 void handleClient(SOCKET clientSocket);
 int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize);
 void receiveFile(SOCKET clientSocket, const std::string& filename);
+void sendHelloMessages();
 
 int main() {
     WSADATA wsaData;
-    SOCKET serverSocket, clientSocket, udpSocket;
-    struct sockaddr_in serverAddr, clientAddr, udpAddr;
+    SOCKET serverSocket, clientSocket;
+    struct sockaddr_in serverAddr, clientAddr;
     int clientAddrSize = sizeof(clientAddr);
 
     // Initialize Winsock
@@ -32,7 +54,7 @@ int main() {
         return 1;
     }
 
-    // Create socket
+    // Create TCP socket
     serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (serverSocket == INVALID_SOCKET) {
         std::cerr << "Socket creation failed.\n";
@@ -61,34 +83,11 @@ int main() {
         return 1;
     }
 
-
-    // Create UDP socket
-    udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udpSocket == INVALID_SOCKET)
-    {
-        std::cerr << "UDP socket creation failed.\n";
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    // UDP address structure
-    udpAddr.sin_family = AF_INET;
-    udpAddr.sin_port = htons(UDP_PORT);
-    udpAddr.sin_addr.s_addr = INADDR_ANY;
-
-    // Bind UDP socket
-    if (bind(udpSocket, (sockaddr*)&udpAddr, sizeof(udpAddr)) == SOCKET_ERROR)
-    {
-        std::cerr << "UDP Bind failed";
-        closesocket(udpSocket);
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-
-
     std::cout << "Server is running and waiting for connections...\n";
+
+    // Start a thread to send periodic hello messages
+    std::thread helloThread(sendHelloMessages);
+    helloThread.detach(); // Detach the thread to run independently
 
     std::vector<std::thread> clientThreads;
 
@@ -102,10 +101,10 @@ int main() {
 
         std::cout << "Client connected.\n";
 
-        // Adds clients to the UDP clients list
+        // Adds client to the clients list
         {
             std::lock_guard<std::mutex> lock(clientsMutex);
-            udpClients.push_back(clientSocket);
+            clientSockets.push_back(clientSocket);
         }
 
         clientThreads.push_back(std::thread(handleClient, clientSocket));
@@ -122,157 +121,208 @@ void handleClient(SOCKET clientSocket) {
     char buffer[BUFFER_SIZE];
     int bytesReceived;
     int buff = 1024;
-    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
+    std::string username;
+
+    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE - 1, 0)) > 0) {
         buffer[bytesReceived] = '\0';
         std::string command(buffer);
 
-        
-         
-           
-                 std::string action = command.substr(0, command.find(' '));
-                 std::string filename = command.substr(command.find(' ') + 1);
+        // Parse the command
+        std::istringstream iss(command);
+        std::string action;
+        iss >> action;
 
-           if (action[0] == '%') {
-                     action = action.substr(1); // Remove the '%' character
-                     std::cout << action << " && " << filename << std::endl;
+        if (action == "REGISTER") {
+            // Handle registration
+            iss >> username;
+            std::string password, ipAddress;
+            int filePort;
+            iss >> password >> ipAddress >> filePort;
 
-                if (action == "put") {
-                    std::cout << "Receiving file: " << filename << "\n";
-                    receiveFile(clientSocket, filename);
-                } else if (action == "get") {
-                    std::cout << "Sending file: " << filename << "\n";
-                    SendFile(clientSocket, filename, buff);
-                } else {
-                    std::cerr << "Unknown command: " << command << "\n";
+            // Add to user directory
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                UserInfo userInfo;
+                userInfo.clientSocket = clientSocket;
+                userInfo.lastActive = std::chrono::steady_clock::now();
+                userInfo.ipAddress = ipAddress;
+                userInfo.filePort = filePort;
+                userDirectory[username] = userInfo;
+            }
+            // Send acknowledgment
+            std::string ack = "REGISTERED " + username;
+            send(clientSocket, ack.c_str(), ack.length(), 0);
+            std::cout << "Registered user: " << username << "\n";
+        }
+        else if (action == "GET_FILE") {
+            // Handle file request
+            std::string filename, ownerUsername;
+            iss >> filename >> ownerUsername;
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                // Check if resource exists and is owned by ownerUsername
+                if (resourceDirectory.find(filename) != resourceDirectory.end() && resourceDirectory[filename] == ownerUsername) {
+                    // Get owner info
+                    if (userDirectory.find(ownerUsername) != userDirectory.end()) {
+                        UserInfo& ownerInfo = userDirectory[ownerUsername];
+                        std::string ownerInfoMessage = "OWNER_INFO " + ownerInfo.ipAddress + " " + std::to_string(ownerInfo.filePort) + " " + filename;
+                        send(clientSocket, ownerInfoMessage.c_str(), ownerInfoMessage.length(), 0);
+                        std::cout << "Sent owner info to " << username << " for file " << filename << "\n";
+                    }
+                    else {
+                        std::string errorMsg = "ERROR Owner not online.";
+                        send(clientSocket, errorMsg.c_str(), errorMsg.length(), 0);
+                    }
+                }
+                else {
+                    std::string errorMsg = "ERROR File not found or incorrect owner.";
+                    send(clientSocket, errorMsg.c_str(), errorMsg.length(), 0);
                 }
             }
-            else {
-               std::cout << "Broadcasting message: " << command << "\n";
-               broadcastMessage(command, clientSocket);
+        }
+        else if (action == "RESOURCES") {
+            // Handle resource announcement
+            iss >> username;
+            std::string resource;
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                while (iss >> resource) {
+                    resourceDirectory[resource] = username;
+                }
             }
+            std::cout << "User " << username << " announced resources.\n";
+        }
+        else if (action == "GET_RESOURCES") {
+            // Handle resource request
+            std::string resourceList = "RESOURCE_LIST ";
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                for (const auto& resource : resourceDirectory) {
+                    resourceList += resource.first + ":" + resource.second + " ";
+                }
+            }
+            // Send resource list to client
+            send(clientSocket, resourceList.c_str(), resourceList.length(), 0);
+        }
+        else if (action == "HELLO_ACK") {
+            // Handle hello acknowledgment
+            iss >> username;
+            std::cout << "Received HELLO_ACK from " << username << "\n";
+            // Update last active time
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                if (userDirectory.find(username) != userDirectory.end()) {
+                    userDirectory[username].lastActive = std::chrono::steady_clock::now();
+                }
+            }
+        }
+        else if (action == "LOGOUT") {
+            // Handle logout
+            iss >> username;
+            {
+                std::lock_guard<std::mutex> lock(directoryMutex);
+                // Remove user from directories
+                userDirectory.erase(username);
+                // Remove user's resources
+                for (auto it = resourceDirectory.begin(); it != resourceDirectory.end();) {
+                    if (it->second == username) {
+                        it = resourceDirectory.erase(it);
+                    }
+                    else {
+                        ++it;
+                    }
+                }
+            }
+            std::cout << "User " << username << " logged out.\n";
+            break; // Exit the loop to end the thread
+        }
+        else {
+            // Handle other commands or messages
+            std::cout << "Received unknown command: " << command << "\n";
+        }
     }
+
+    // Client disconnected
     {
         std::lock_guard<std::mutex> lock(clientsMutex);
-        auto it = std::remove(udpClients.begin(), udpClients.end(), clientSocket);
-        udpClients.erase(it, udpClients.end());
+        auto it = std::remove(clientSockets.begin(), clientSockets.end(), clientSocket);
+        clientSockets.erase(it, clientSockets.end());
+    }
+    {
+        std::lock_guard<std::mutex> lock(directoryMutex);
+        // Remove user from directories if not already removed
+        for (auto it = userDirectory.begin(); it != userDirectory.end();) {
+            if (it->second.clientSocket == clientSocket) {
+                std::string disconnectedUser = it->first;
+                userDirectory.erase(it);
+                // Remove user's resources
+                for (auto resIt = resourceDirectory.begin(); resIt != resourceDirectory.end();) {
+                    if (resIt->second == disconnectedUser) {
+                        resIt = resourceDirectory.erase(resIt);
+                    }
+                    else {
+                        ++resIt;
+                    }
+                }
+                break;
+            }
+            else {
+                ++it;
+            }
+        }
     }
     // Close the client socket
     closesocket(clientSocket);
     std::cout << "Client disconnected.\n";
 }
 
+// Function to send periodic hello messages
+void sendHelloMessages() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(30)); // Adjust interval as needed
+        std::lock_guard<std::mutex> lock(directoryMutex);
+        auto now = std::chrono::steady_clock::now();
 
-void broadcastMessage(const std::string& message, SOCKET senderSocket)
-{
-    {
-        std::lock_guard<std::mutex> lock(clientsMutex);
+        for (auto it = userDirectory.begin(); it != userDirectory.end();) {
+            std::string username = it->first;
+            UserInfo& userInfo = it->second;
 
-        for (SOCKET client : udpClients)
-        {
-            send(client, message.c_str(), message.length(), 0);
+            // Send HELLO message
+            std::string helloMessage = "HELLO";
+            int sendResult = send(userInfo.clientSocket, helloMessage.c_str(), helloMessage.length(), 0);
+            if (sendResult == SOCKET_ERROR) {
+                int error = WSAGetLastError();
+                std::cerr << "send failed with error: " << error << "\n";
+                // Remove client from directories
+                std::cout << "Removing user due to send error: " << username << "\n";
+                userDirectory.erase(it++);
+                continue;
+            }
+
+            // Check if the user has been inactive for more than a threshold
+            auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - userInfo.lastActive).count();
+            if (duration > 90) { // If inactive for more than 90 seconds
+                std::cout << "Removing inactive user: " << username << "\n";
+
+                // Remove user's resources
+                for (auto resIt = resourceDirectory.begin(); resIt != resourceDirectory.end();) {
+                    if (resIt->second == username) {
+                        resIt = resourceDirectory.erase(resIt);
+                    }
+                    else {
+                        ++resIt;
+                    }
+                }
+
+                // Close the client socket
+                closesocket(userInfo.clientSocket);
+
+                // Remove user from directory
+                userDirectory.erase(it++);
+            }
+            else {
+                ++it;
+            }
         }
     }
 }
-
-
-
-//function to recieve file from client
-void receiveFile(SOCKET clientSocket, const std::string& filename) {
-    std::ofstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Could not create file: " << filename << "\n";
-        return;
-    }
-
-    char buffer[BUFFER_SIZE];
-    int bytesReceived;
-    bool dataReceived = false;
-
-    while ((bytesReceived = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
-        dataReceived = true;
-        file.write(buffer, bytesReceived);
-        if (bytesReceived < BUFFER_SIZE) {
-            break;  // Assume the transmission is complete if less than buffer size is received.
-        }
-    }
-
-    file.close();
-
-    if (!dataReceived) {
-        std::cerr << "No data received for file: " << filename << "\n";
-        send(clientSocket, "File upload failed: No data received", 38, 0);
-        std::remove(filename.c_str());
-    } else {
-        std::cout << "File " << filename << " received from client.\n";
-        send(clientSocket, "File upload successful", 22, 0);
-    }
-}
-
-//function to recieve file size for buffer
-int64_t GetFileSize(const std::string& fileName) {
-   
-    FILE* f;
-    if (fopen_s(&f, fileName.c_str(), "rb") != 0) {
-        return -1;
-    }
-    _fseeki64(f, 0, SEEK_END);
-    const int64_t len = _ftelli64(f);
-    fclose(f);
-    return len;
-}
-
-//recieve buffer data of file for retrieval
-int RecvBuffer(SOCKET s, char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
-    int i = 0;
-    while (i < bufferSize) {
-        const int l = recv(s, &buffer[i], __min(chunkSize, bufferSize - i), 0);
-        if (l < 0) { return l; } // this is an error
-        i += l;
-    }
-    return i;
-}
-
-//sends buffer to confirm file data
-int SendBuffer(SOCKET s, const char* buffer, int bufferSize, int chunkSize = 4 * 1024) {
-
-    int i = 0;
-    while (i < bufferSize) {
-        const int l = send(s, &buffer[i], __min(chunkSize, bufferSize - i), 0);
-        if (l < 0) { return l; } // this is an error
-        i += l;
-    }
-    return i;
-}
-
-//function to send file data to client
-int64_t SendFile(SOCKET s, const std::string& fileName, int chunkSize = 64 * 1024) {
-
-    const int64_t fileSize = GetFileSize(fileName);
-    if (fileSize < 0) { return -1; }
-
-    std::ifstream file(fileName, std::ifstream::binary);
-    if (file.fail()) { return -1; }
-
-    if (SendBuffer(s, reinterpret_cast<const char*>(&fileSize),
-        sizeof(fileSize)) != sizeof(fileSize)) {
-        return -2;
-    }
-
-    char* buffer = new char[chunkSize];
-    bool errored = false;
-    int64_t i = fileSize;
-    while (i != 0) {
-        const int64_t ssize = __min(i, (int64_t)chunkSize);
-        if (!file.read(buffer, ssize)) { errored = true; break; }
-        const int l = SendBuffer(s, buffer, (int)ssize);
-        if (l < 0) { errored = true; break; }
-        i -= l;
-    }
-    delete[] buffer;
-
-    file.close();
-
-    return errored ? -3 : fileSize;
-}
-
-
